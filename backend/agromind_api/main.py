@@ -1,7 +1,7 @@
 import csv
 import io
 import os
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -49,6 +49,13 @@ class DiseaseDiagnosis(BaseModel):
     symptoms: list[str]
     recommendations: list[str]
     follow_up: list[str]
+
+
+class SpecialistPrompt(TypedDict):
+    agent: Literal["Disease", "Irrigation", "Resources", "Market"]
+    image: str | None
+    prompt: str
+    fallback: str
 
 
 AUTHORIZED_DOMAINS = {
@@ -103,15 +110,28 @@ AGENT_REGISTRY = {
 }
 
 
-async def gemini(prompt: str) -> str | None:
+async def gemini(prompt: str, image: str | None = None) -> str | None:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return None
 
     model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    parts: list[dict[str, Any]] = [{"text": prompt}]
+    if image and image.startswith("data:"):
+        metadata, separator, image_data = image.partition(",")
+        mime_type = metadata[5:].split(";", 1)[0]
+        if separator and ";base64" in metadata and mime_type.startswith("image/"):
+            parts.append(
+                {
+                    "inlineData": {
+                        "mimeType": mime_type,
+                        "data": image_data,
+                    }
+                }
+            )
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 300},
     }
 
@@ -341,7 +361,8 @@ async def analyze_crop(field: FieldInput) -> dict[str, Any]:
     diagnosis = await gemini(
         "Analyze this crop condition. Return plain structured JSON only with "
         "crop_name, disease_name, confidence, severity, symptoms, recommendations, "
-        "and follow_up. Do not invent a confirmed diagnosis and do not prescribe doses. "
+        "and follow_up. Use any supplied image as visual evidence, distinguish symptoms "
+        "from confirmed disease, and do not prescribe doses. "
         f"Crop={field.crop}; district={field.district}; symptoms={field.issue}.",
         field.image,
     )
@@ -455,13 +476,15 @@ async def analyze(field: FieldInput) -> dict[str, Any]:
         {"crop": field.crop, "district": field.district},
     )
 
-    specialists = [
+    specialists: list[SpecialistPrompt] = [
         {
             "agent": "Disease",
+            "image": field.image,
             "prompt": (
                 "You are the independent Disease Detection Agent. "
                 f"crop={field.crop}; issue={field.issue}; district={field.district}; "
                 f"disease_evidence={disease or 'not connected'}. "
+                "Use the supplied image as visual evidence when available. "
                 "Return <=45 words: likely causes, two checks, confidence, escalation threshold."
             ),
             "fallback": (
@@ -472,6 +495,7 @@ async def analyze(field: FieldInput) -> dict[str, Any]:
         },
         {
             "agent": "Irrigation",
+            "image": None,
             "prompt": (
                 "You are the independent Smart Irrigation Agent. "
                 f"crop={field.crop}; soil={field.soil}; moisture={field.moisture}%; "
@@ -486,6 +510,7 @@ async def analyze(field: FieldInput) -> dict[str, Any]:
         },
         {
             "agent": "Resources",
+            "image": None,
             "prompt": (
                 "You are the independent Resource Optimization Agent. "
                 f"crop={field.crop}; soil={field.soil}; district={field.district}; "
@@ -500,6 +525,7 @@ async def analyze(field: FieldInput) -> dict[str, Any]:
         },
         {
             "agent": "Market",
+            "image": None,
             "prompt": (
                 "You are the independent Market Intelligence Agent. "
                 f"crop={field.crop}; district={field.district}; "
@@ -526,7 +552,7 @@ async def analyze(field: FieldInput) -> dict[str, Any]:
 
     agents: list[AgentResult] = []
     for specialist in specialists:
-        text = await gemini(specialist["prompt"])
+        text = await gemini(specialist["prompt"], specialist["image"])
         agents.append(
             AgentResult(
                 agent=specialist["agent"],

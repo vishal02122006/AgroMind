@@ -16,6 +16,10 @@ Open:
 - Health: http://127.0.0.1:8000/health
 - Ecosystem registry: http://127.0.0.1:8000/api/ecosystem
 
+## Crop image analysis
+
+`POST /api/analyze-crop` and `POST /api/analyze` accept an optional `image` data URI, for example `data:image/jpeg;base64,<base64-data>`. When Gemini is configured, the Disease specialist sends the image along with crop and symptom context. The result is a triage aid, not a confirmed diagnosis; verify it with a local crop-health expert before treatment.
+
 ## Test
 
 ```powershell
