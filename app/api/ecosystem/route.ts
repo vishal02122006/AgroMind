@@ -22,7 +22,7 @@ export async function GET() {
     },
     agents: [
       { name: "Disease", domain: "disease", authorizedSources: ["Krishi DSS"], status: "fallback" },
-      { name: "Irrigation", domain: "weather", authorizedSources: ["Open-Meteo", "IMD gateway"], status: "connected" },
+      { name: "Irrigation", domain: "weather", authorizedSources: ["Open-Meteo"], status: "connected" },
       { name: "Resources", domain: "soil", authorizedSources: ["Soil Health Card"], status: "fallback" },
       { name: "Market", domain: "market", authorizedSources: ["data.gov.in", "AGMARKNET", "Agricultural indices"], status: "fallback" },
     ],

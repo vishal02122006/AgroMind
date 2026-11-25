@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from agromind_api.main import app
+from agromind_api.main import AgentResult, FieldInput, app, orchestrate
 
 
 client = TestClient(app)
@@ -11,6 +11,58 @@ def test_health() -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_gemini_network_error_returns_specialist_fallback(monkeypatch) -> None:
+    async def fail_request(_request):
+        raise httpx.ConnectError("offline")
+
+    original_async_client = httpx.AsyncClient
+
+    def failing_async_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(fail_request)
+        return original_async_client(*args, **kwargs)
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "agromind_api.main.httpx.AsyncClient", failing_async_client
+    )
+
+    response = client.post(
+        "/api/analyze",
+        json={
+            "crop": "Tomato",
+            "district": "Anantapur",
+            "soil": "Red sandy loam",
+            "moisture": "22",
+            "rain": "18",
+            "issue": "Yellow-brown spots",
+            "specialist": "Disease",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["agents"][0]["status"] == "fallback"
+
+
+def test_weather_network_error_is_reported_as_unavailable(monkeypatch) -> None:
+    async def fail_request(_request):
+        raise httpx.ConnectError("offline")
+
+    original_async_client = httpx.AsyncClient
+
+    def failing_async_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(fail_request)
+        return original_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "agromind_api.main.httpx.AsyncClient", failing_async_client
+    )
+
+    response = client.get("/api/weather/Anantapur")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Weather data unavailable"
 
 
 def test_analyze_returns_all_specialists(monkeypatch) -> None:
@@ -49,6 +101,8 @@ def test_analyze_returns_all_specialists(monkeypatch) -> None:
     ]
     assert len(body["plan"]) >= 3
     assert len(body["sources"]) == 5
+    assert body["orchestratorRan"] is True
+    assert all(agent["confidence"] is None for agent in body["agents"])
 
 
 def test_ecosystem_reports_all_agents_and_orchestrator() -> None:
@@ -62,6 +116,8 @@ def test_ecosystem_reports_all_agents_and_orchestrator() -> None:
         "Resources",
         "Market",
     ]
+    irrigation = next(agent for agent in body["agents"] if agent["name"] == "Irrigation")
+    assert irrigation["authorizedSources"] == ["Open-Meteo"]
 
 
 def test_source_status_lists_all_authorized_sources() -> None:
@@ -75,6 +131,29 @@ def test_source_status_lists_all_authorized_sources() -> None:
         "Krishi DSS",
         "Soil Health Card",
     }
+
+
+def test_market_conflict_uses_evidence_availability_not_summary_wording() -> None:
+    field = FieldInput(
+        crop="Tomato",
+        district="Anantapur",
+        soil="Red sandy loam",
+        moisture="22",
+        rain="18",
+        issue="Yellow-brown spots",
+    )
+    market_agent = AgentResult(
+        agent="Market",
+        status="ok",
+        summary="Current prices show a seasonal increase.",
+        confidence=None,
+    )
+
+    _, available_conflicts = orchestrate(field, [market_agent], market_available=True)
+    _, missing_conflicts = orchestrate(field, [market_agent], market_available=False)
+
+    assert not any("Market evidence incomplete" in item for item in available_conflicts)
+    assert any("Market evidence incomplete" in item for item in missing_conflicts)
 
 
 @pytest.mark.parametrize(
@@ -144,6 +223,7 @@ def test_specialist_only_run_uses_only_selected_evidence(
     assert len(gemini_calls) == 1
     assert len(body["sources"]) == expected_source_count
     assert "full collaboration" in body["plan"][0].lower()
+    assert body["orchestratorRan"] is False
 
 
 def test_analyze_crop_includes_image_in_gemini_request(monkeypatch) -> None:

@@ -17,7 +17,7 @@ type AgentResult = {
   agent: string;
   status: "ok" | "fallback";
   summary: string;
-  confidence: number;
+  confidence: number | null;
 };
 
 async function gemini(prompt: string, image?: string) {
@@ -25,34 +25,42 @@ async function gemini(prompt: string, image?: string) {
   if (!key) return null;
 
   const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      body: JSON.stringify({
-        contents: [{
-          role: "user",
-          parts: [
-            { text: prompt },
-            ...(image?.startsWith("data:")
-              ? [{
-                  inlineData: {
-                    mimeType: image.slice(5, image.indexOf(";")),
-                    data: image.slice(image.indexOf(",") + 1),
-                  },
-                }]
-              : []),
-          ],
-        }],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 300 },
-      }),
-      cache: "no-store",
-    },
-  );
-  if (!response.ok) return null;
-  const data = await response.json();
-  return data.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text || "").join("") || null;
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({
+          contents: [{
+            role: "user",
+            parts: [
+              { text: prompt },
+              ...(image?.startsWith("data:")
+                ? [{
+                    inlineData: {
+                      mimeType: image.slice(5, image.indexOf(";")),
+                      data: image.slice(image.indexOf(",") + 1),
+                    },
+                  }]
+                : []),
+            ],
+          }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 300 },
+        }),
+        cache: "no-store",
+      },
+    );
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text || "").join("") || null;
+  } catch (error) {
+    console.warn(
+      "Gemini request failed",
+      error instanceof Error ? error.name : "UnknownError",
+    );
+    return null;
+  }
 }
 
 async function getWeather(district: string) {
@@ -196,7 +204,7 @@ async function getCropDiseaseEvidence(crop: string, district: string) {
 }
 
 function fallbackAgent(agent: string, detail: string): AgentResult {
-  return { agent, status: "fallback", summary: detail, confidence: 55 };
+  return { agent, status: "fallback", summary: detail, confidence: null };
 }
 
 export async function POST(request: Request) {
@@ -205,6 +213,19 @@ export async function POST(request: Request) {
     input = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+  }
+
+  const validSpecialists = new Set([
+    "Disease",
+    "Irrigation",
+    "Resources",
+    "Market",
+  ]);
+  if (
+    input.specialist != null &&
+    !validSpecialists.has(input.specialist)
+  ) {
+    return NextResponse.json({ error: "Invalid specialist" }, { status: 422 });
   }
 
   const pythonApiUrl = process.env.AGROMIND_PYTHON_API_URL;
@@ -295,7 +316,7 @@ export async function POST(request: Request) {
     const text = await gemini(specialist.prompt, specialist.image);
     agents.push(
       text
-        ? { agent: specialist.agent, status: "ok", summary: text, confidence: 72 }
+        ? { agent: specialist.agent, status: "ok", summary: text, confidence: null }
         : fallbackAgent(specialist.agent, specialist.fallback),
     );
   }
@@ -360,6 +381,7 @@ export async function POST(request: Request) {
         ? [`Only the ${input.specialist} specialist ran; cross-agent orchestration was skipped.`]
         : []),
     ],
+    orchestratorRan: !specialistOnly,
     agents,
     sources: sourcesForSpecialist,
     evidence: {

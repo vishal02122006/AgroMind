@@ -29,6 +29,8 @@ python -m pytest backend/tests -q
 python backend/training/evaluate_agents.py
 ```
 
+The offline benchmark checks prompt construction and guardrails; use `--live` to evaluate configured Gemini responses.
+
 ## Evidence configuration
 
 Configure secrets as environment variables; never commit them:

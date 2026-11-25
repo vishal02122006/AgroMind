@@ -4,10 +4,11 @@ import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useSta
 import { supabase } from "./lib/supabase";
 
 type View = "overview" | "disease" | "field" | "collaboration" | "evidence" | "assistant";
-type AgentResult = { agent: string; status: "ok" | "fallback"; summary: string; confidence: number };
+type AgentResult = { agent: string; status: "idle" | "ok" | "fallback"; summary: string; confidence: number | null };
 type RunResult = {
   plan: string[];
   warnings: string[];
+  orchestratorRan?: boolean | null;
   agents: AgentResult[];
   sources: { name: string; status: "authorized" | "illustrative"; url?: string }[];
 };
@@ -15,11 +16,12 @@ type RunResult = {
 const emptyResult: RunResult = {
   plan: ["Select a field scenario or upload a crop image to begin."],
   warnings: ["No action is executed automatically."],
+  orchestratorRan: null,
   agents: [
-    { agent: "Disease", status: "ok", summary: "Upload a crop image or describe symptoms to analyze.", confidence: 0 },
-    { agent: "Irrigation", status: "ok", summary: "Set moisture and rainfall to review water timing.", confidence: 0 },
-    { agent: "Resources", status: "ok", summary: "Add soil and district context for nutrient review.", confidence: 0 },
-    { agent: "Market", status: "ok", summary: "Select crop and district to review market context.", confidence: 0 },
+    { agent: "Disease", status: "idle", summary: "Upload a crop image or describe symptoms to analyze.", confidence: null },
+    { agent: "Irrigation", status: "idle", summary: "Set moisture and rainfall to review water timing.", confidence: null },
+    { agent: "Resources", status: "idle", summary: "Add soil and district context for nutrient review.", confidence: null },
+    { agent: "Market", status: "idle", summary: "Select crop and district to review market context.", confidence: null },
   ],
   sources: [{ name: "No source request has run", status: "illustrative" }],
 };
@@ -421,14 +423,13 @@ export default function Home() {
                 </div>
               </article>
               <article className="metric-card weather-card">
-                <span>Field weather</span><strong>28°C</strong>
-                <div className="mini-bars" aria-label="Rain forecast">{[42,58,76,64,35].map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}</div>
-                <small>18 mm forecast · next 24 hours</small>
+                <span>Rainfall input</span><strong>{form.rain} mm</strong>
+                <small>Scenario value · not a live forecast</small>
               </article>
               <article className="metric-card moisture-card">
-                <span>Root-zone moisture</span><strong>22%</strong>
-                <div className="moisture-ring"><i>Low</i></div>
-                <small>Measurement: 22 cm depth</small>
+                <span>Root-zone moisture input</span><strong>{form.moisture}%</strong>
+                <div className="moisture-ring"><i>Input</i></div>
+                <small>Scenario value · not a live sensor reading</small>
               </article>
               <article className="action-card">
                 <div className="action-card-head"><h3>Today’s field workflow</h3><b>4 steps</b></div>
@@ -440,12 +441,12 @@ export default function Home() {
                 </div>
               </article>
               <article className="field-map-card">
-                <div className="field-map-head"><div><span>Live parcel</span><strong>Anantapur · Plot 07</strong></div><b>12.4 acres</b></div>
-                <div className="field-map" aria-label="Stylized field map">
+                <div className="field-map-head"><div><span>Illustrative parcel</span><strong>Anantapur · Sample plot</strong></div><b>Demo only</b></div>
+                <div className="field-map" aria-label="Illustrative field map, not connected to live field data">
                   <div className="field-row row-a" /><div className="field-row row-b" /><div className="field-row row-c" />
                   <span className="field-pin pin-a">A1</span><span className="field-pin pin-b">A2</span><span className="field-pin pin-c">A3</span>
                 </div>
-                <div className="field-map-legend"><span><i className="healthy" />Healthy</span><span><i className="watch" />Monitor</span><span><i className="dry" />Dry zone</span></div>
+                <div className="field-map-legend"><span><i className="healthy" />Illustrative zones · no field measurements</span></div>
               </article>
             </div>
           )}
@@ -498,27 +499,37 @@ export default function Home() {
                 {["Disease", "Irrigation", "Resources", "Market", "Orchestrator"].map((name, index) => {
                   const agent = result.agents.find((item) => item.agent === name);
                   const working = loading && activeAgent === name;
+                  const connected = name === "Orchestrator"
+                    ? result.orchestratorRan === true
+                    : agent?.status === "ok";
+                  const summary = name === "Orchestrator"
+                    ? (result.orchestratorRan ?? null) === null
+                      ? "Not run yet."
+                      : result.orchestratorRan
+                        ? "Coordinated plan ready."
+                        : "Skipped for specialist-only analysis."
+                    : agent?.summary || "Not run yet.";
                   return (
                     <div className="flow-node" key={name}>
-                      <span className={`flow-dot ${working ? "working" : agent?.status === "ok" ? "connected" : ""}`}>{index + 1}</span>
+                      <span className={`flow-dot ${working ? "working" : connected ? "connected" : ""}`}>{index + 1}</span>
                       <strong>{name}</strong>
-                      <small>{working ? "Analyzing..." : agent?.summary}</small>
+                      <small>{working ? "Analyzing..." : summary}</small>
                     </div>
                   );
                 })}
               </div>
               <div className="specialist-grid">
                 {[
-                  { name: "Disease", icon: "◉", input: "Crop image · symptoms", output: "Likely cause · confidence · escalation", handoff: "Irrigation · Resources · Orchestrator" },
-                  { name: "Irrigation", icon: "≈", input: "Moisture · rainfall · crop stage", output: "Water timing · root-zone check", handoff: "Disease · Resources · Orchestrator" },
-                  { name: "Resources", icon: "◇", input: "Soil type · district · soil test", output: "Nutrient workflow · cost signal", handoff: "Irrigation · Market · Orchestrator" },
+                  { name: "Disease", icon: "◉", input: "Crop image · symptoms", output: "Likely causes · uncertainty · escalation", handoff: "Irrigation · Resources · Orchestrator" },
+                  { name: "Irrigation", icon: "≈", input: "Crop · moisture · rainfall", output: "Water timing · root-zone check", handoff: "Disease · Resources · Orchestrator" },
+                  { name: "Resources", icon: "◇", input: "Soil type · district · lab evidence", output: "Nutrient workflow · lab checks", handoff: "Irrigation · Market · Orchestrator" },
                   { name: "Market", icon: "⌁", input: "Crop · district · production index", output: "Mandi evidence · harvest context", handoff: "Resources · Orchestrator" },
                 ].map((agent) => {
                   const response = result.agents.find((item) => item.agent === agent.name);
                   const working = loading && activeAgent === agent.name;
                   return (
                     <article className={`specialist-card ${working ? "working" : ""}`} key={agent.name}>
-                      <div className="specialist-head"><span>{agent.icon}</span><div><small>Independent specialist</small><h3>{agent.name}</h3></div><b className={response?.status === "ok" ? "connected" : ""}>{working ? "Running" : response?.status === "ok" ? "Responded" : "Fallback"}</b></div>
+                      <div className="specialist-head"><span>{agent.icon}</span><div><small>Independent specialist</small><h3>{agent.name}</h3></div><b className={response?.status === "ok" ? "connected" : ""}>{working ? "Running" : response?.status === "ok" ? "Responded" : response?.status === "fallback" ? "Fallback" : "Not run"}</b></div>
                       <div className="specialist-input"><strong>Receives</strong><span>{agent.input}</span></div>
                       <div className="specialist-output"><strong>Produces</strong><p>{working ? "Requesting verified evidence and preparing a response..." : response?.summary || "Waiting for analysis."}</p><small>{agent.output}</small></div>
                       <div className="handoff-line"><strong>Handoff</strong><span>{agent.handoff}</span></div>
@@ -533,8 +544,8 @@ export default function Home() {
                 })}
               </div>
               <div className="orchestrator-card">
-                <div><span>◎</span><div><small>Final reconciliation</small><h3>Central Orchestrator</h3></div></div>
-                <article><div className="panel-title"><span className="eyebrow">Unified result</span><h2>Coordinated action plan</h2></div><ul className="plan-list">{result.plan.map((item) => <li key={item}>{item}</li>)}</ul>{result.warnings.map((item) => <p className="warning" key={item}>! {item}</p>)}</article>
+                <div><span>◎</span><div><small>{(result.orchestratorRan ?? null) === null ? "Ready when collaboration runs" : result.orchestratorRan ? "Final reconciliation" : "Skipped for specialist-only analysis"}</small><h3>Central Orchestrator</h3></div></div>
+                <article><div className="panel-title"><span className="eyebrow">{result.orchestratorRan === true ? "Unified result" : result.orchestratorRan === false ? "Specialist-only result" : "Awaiting analysis"}</span><h2>{result.orchestratorRan === true ? "Coordinated action plan" : result.orchestratorRan === false ? "Not a coordinated plan" : "Run agents to build a plan"}</h2></div><ul className="plan-list">{result.plan.map((item) => <li key={item}>{item}</li>)}</ul>{result.warnings.map((item) => <p className="warning" key={item}>! {item}</p>)}</article>
               </div>
             </div>
           )}
