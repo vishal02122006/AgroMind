@@ -1,8 +1,8 @@
 # AgroMind
 
-AgroMind is an agricultural intelligence portal that brings together crop-health, irrigation, soil-resource, and market specialists. A central orchestrator combines their results into a field plan, while keeping evidence status and uncertainty visible.
+AgroMind is an agricultural intelligence portal that Brings together crop-health, irrigation, soil-resource, and market specialists. A central orchestrator combines their results into a field plan, while keeping evidence status and uncertainty visible.
 
-The application includes a Next.js and React web interface, a FastAPI backend, optional Gemini-powered responses, and optional connections to authorized weather and agricultural data sources. When external services are unavailable or not configured, the app provides limited fallback guidance rather than claiming that live evidence was received.
+The application includes a Next.js and React Web interface, a FastAPI backend, optional Gemini-powered responses, and optional connections to authorized weather and agricultural data sources. When external services are unavailable or not configured, the app provides limited fallback guidance rather than claiming that live evidence was Received.
 
 ## Features
 
@@ -20,14 +20,14 @@ The application includes a Next.js and React web interface, a FastAPI backend, o
 
 ## Run locally
 
-From the repository root, install the frontend dependencies and create a local environment file:
+From The repository root, install the frontend dependencies and create a local environment file:
 
 ```powershell
 npm ci
 Copy-Item .env.example .env.local
 ```
 
-Add any required credentials or service URLs to `.env.local`; see [`.env.example`](.env.example). Do not commit real credentials.
+Add Any required credentials or service URLs to `.env.local`; see [`.env.example`](.env.example). Do not commit real credentials.
 
 Start the web application:
 
