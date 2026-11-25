@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from agromind_api.main import app
@@ -76,19 +77,53 @@ def test_source_status_lists_all_authorized_sources() -> None:
     }
 
 
-def test_specialist_only_run(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("specialist", "expected_evidence_calls", "expected_source_count"),
+    [
+        ("Disease", ["KRISHI_DSS_API_URL"], 1),
+        ("Irrigation", ["weather"], 1),
+        ("Resources", ["SOIL_HEALTH_API_URL"], 1),
+        ("Market", ["market", "production"], 2),
+    ],
+)
+def test_specialist_only_run_uses_only_selected_evidence(
+    monkeypatch, specialist, expected_evidence_calls, expected_source_count
+) -> None:
+    evidence_calls = []
+    gemini_calls = []
+
     async def no_core_evidence(field):
+        evidence_calls.append("core")
         return None, None, None
 
-    async def no_external_evidence(*args, **kwargs):
+    async def capture_external_evidence(url_env, *args, **kwargs):
+        evidence_calls.append(url_env)
         return None
 
-    async def no_gemini(prompt, image=None):
+    async def capture_weather(district):
+        evidence_calls.append("weather")
+        return None
+
+    async def capture_market(crop, district):
+        evidence_calls.append("market")
+        return None
+
+    async def capture_production_index(crop):
+        evidence_calls.append("production")
+        return None
+
+    async def capture_gemini(prompt, image=None):
+        gemini_calls.append(prompt)
         return None
 
     monkeypatch.setattr("agromind_api.main._gather_core_evidence", no_core_evidence)
-    monkeypatch.setattr("agromind_api.main.get_authorized_evidence", no_external_evidence)
-    monkeypatch.setattr("agromind_api.main.gemini", no_gemini)
+    monkeypatch.setattr(
+        "agromind_api.main.get_authorized_evidence", capture_external_evidence
+    )
+    monkeypatch.setattr("agromind_api.main.get_weather", capture_weather)
+    monkeypatch.setattr("agromind_api.main.get_authorized_market", capture_market)
+    monkeypatch.setattr("agromind_api.main.get_production_index", capture_production_index)
+    monkeypatch.setattr("agromind_api.main.gemini", capture_gemini)
 
     response = client.post(
         "/api/analyze",
@@ -99,11 +134,16 @@ def test_specialist_only_run(monkeypatch) -> None:
             "moisture": "22",
             "rain": "18",
             "issue": "Yellow-brown spots",
-            "specialist": "Irrigation",
+            "specialist": specialist,
         },
     )
     assert response.status_code == 200
-    assert [agent["agent"] for agent in response.json()["agents"]] == ["Irrigation"]
+    body = response.json()
+    assert [agent["agent"] for agent in body["agents"]] == [specialist]
+    assert evidence_calls == expected_evidence_calls
+    assert len(gemini_calls) == 1
+    assert len(body["sources"]) == expected_source_count
+    assert "full collaboration" in body["plan"][0].lower()
 
 
 def test_analyze_crop_includes_image_in_gemini_request(monkeypatch) -> None:
@@ -188,4 +228,4 @@ def test_analyze_passes_image_only_to_disease_agent(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert calls[0][1] == image
-    assert calls[1][1] is None
+    assert len(calls) == 1

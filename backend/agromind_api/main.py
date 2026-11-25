@@ -464,17 +464,46 @@ async def source_status() -> dict[str, Any]:
 
 @app.post("/api/analyze")
 async def analyze(field: FieldInput) -> dict[str, Any]:
-    weather, market, index = await _gather_core_evidence(field)
-    soil = await get_authorized_evidence(
-        "SOIL_HEALTH_API_URL",
-        "SOIL_HEALTH_API_KEY",
-        {"district": field.district, "soilType": field.soil},
-    )
-    disease = await get_authorized_evidence(
-        "KRISHI_DSS_API_URL",
-        "KRISHI_DSS_API_KEY",
-        {"crop": field.crop, "district": field.district},
-    )
+    specialist_only = field.specialist in AGENT_REGISTRY
+    weather: dict[str, Any] | None = None
+    market: dict[str, Any] | None = None
+    index: dict[str, Any] | None = None
+    soil: dict[str, Any] | None = None
+    disease: dict[str, Any] | None = None
+
+    if field.specialist == "Disease":
+        disease = await get_authorized_evidence(
+            "KRISHI_DSS_API_URL",
+            "KRISHI_DSS_API_KEY",
+            {"crop": field.crop, "district": field.district},
+        )
+    elif field.specialist == "Irrigation":
+        weather = await get_weather(field.district)
+    elif field.specialist == "Resources":
+        soil = await get_authorized_evidence(
+            "SOIL_HEALTH_API_URL",
+            "SOIL_HEALTH_API_KEY",
+            {"district": field.district, "soilType": field.soil},
+        )
+    elif field.specialist == "Market":
+        import asyncio
+
+        market, index = await asyncio.gather(
+            get_authorized_market(field.crop, field.district),
+            get_production_index(field.crop),
+        )
+    else:
+        weather, market, index = await _gather_core_evidence(field)
+        soil = await get_authorized_evidence(
+            "SOIL_HEALTH_API_URL",
+            "SOIL_HEALTH_API_KEY",
+            {"district": field.district, "soilType": field.soil},
+        )
+        disease = await get_authorized_evidence(
+            "KRISHI_DSS_API_URL",
+            "KRISHI_DSS_API_KEY",
+            {"crop": field.crop, "district": field.district},
+        )
 
     specialists: list[SpecialistPrompt] = [
         {
@@ -562,22 +591,28 @@ async def analyze(field: FieldInput) -> dict[str, Any]:
             )
         )
 
-    orchestrator_prompt = (
-        "You are the central agricultural orchestrator. Reconcile these independent outputs "
-        f"and produce 3 concise actions and 1 warning: {agents}. "
-        "Require local agronomist, soil-lab, and farmer approval."
-    )
-    orchestrator_text = await gemini(orchestrator_prompt)
-    deterministic_plan, conflicts = orchestrate(field, agents)
-    plan = deterministic_plan
-    if orchestrator_text:
-        orchestrated = [
-            line.strip(" -*0123456789.)")
-            for line in orchestrator_text.replace("\n", " ").split(". ")
-            if line.strip()
+    conflicts: list[str] = []
+    if specialist_only:
+        plan = [
+            f"{field.specialist} specialist result is available above. "
+            "Run full collaboration for a coordinated plan."
         ]
-        if orchestrated:
-            plan = (orchestrated + plan)[:4]
+    else:
+        orchestrator_prompt = (
+            "You are the central agricultural orchestrator. Reconcile these independent outputs "
+            f"and produce 3 concise actions and 1 warning: {agents}. "
+            "Require local agronomist, soil-lab, and farmer approval."
+        )
+        orchestrator_text = await gemini(orchestrator_prompt)
+        plan, conflicts = orchestrate(field, agents)
+        if orchestrator_text:
+            orchestrated = [
+                line.strip(" -*0123456789.)")
+                for line in orchestrator_text.replace("\n", " ").split(". ")
+                if line.strip()
+            ]
+            if orchestrated:
+                plan = (orchestrated + plan)[:4]
 
     sources = [
         {
@@ -601,14 +636,29 @@ async def analyze(field: FieldInput) -> dict[str, Any]:
             "status": "authorized" if index else "illustrative",
         },
     ]
+    source_indices_by_specialist = {
+        "Disease": (1,),
+        "Irrigation": (0,),
+        "Resources": (2,),
+        "Market": (3, 4),
+    }
+    if field.specialist is not None:
+        source_indices = source_indices_by_specialist.get(field.specialist)
+        if source_indices is not None:
+            sources = [sources[index] for index in source_indices]
 
+    warnings = [
+        "No treatment, irrigation release, or fertilizer dose is applied automatically.",
+        "Local agronomic verification is required before consequential action.",
+    ]
+    if specialist_only:
+        warnings.append(
+            f"Only the {field.specialist} specialist ran; cross-agent orchestration was skipped."
+        )
+    warnings.extend(conflicts)
     return {
         "plan": plan,
-        "warnings": [
-            "No treatment, irrigation release, or fertilizer dose is applied automatically.",
-            "Local agronomic verification is required before consequential action.",
-            *conflicts,
-        ],
+        "warnings": warnings,
         "agents": [agent.model_dump() for agent in agents],
         "sources": sources,
         "evidence": {

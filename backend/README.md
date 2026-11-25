@@ -20,6 +20,8 @@ Open:
 
 `POST /api/analyze-crop` and `POST /api/analyze` accept an optional `image` data URI, for example `data:image/jpeg;base64,<base64-data>`. When Gemini is configured, the Disease specialist sends the image along with crop and symptom context. The result is a triage aid, not a confirmed diagnosis; verify it with a local crop-health expert before treatment.
 
+When `POST /api/analyze` includes a `specialist`, only that agent's evidence sources are queried and the orchestrator is skipped. Omit `specialist` to run the full coordinated analysis.
+
 ## Test
 
 ```powershell

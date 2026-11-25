@@ -224,11 +224,31 @@ export async function POST(request: Request) {
     }
   }
 
-  const weather = await getWeather(input.district);
-  const market = await getAuthorizedMarket(input.crop, input.district);
-  const productionIndex = await getProductionIndex(input.crop);
-  const soilEvidence = await getSoilEvidence(input.district, input.soil);
-  const diseaseEvidence = await getCropDiseaseEvidence(input.crop, input.district);
+  const specialistOnly =
+    input.specialist === "Disease" ||
+    input.specialist === "Irrigation" ||
+    input.specialist === "Resources" ||
+    input.specialist === "Market";
+  const weather =
+    !specialistOnly || input.specialist === "Irrigation"
+      ? await getWeather(input.district)
+      : null;
+  const market =
+    !specialistOnly || input.specialist === "Market"
+      ? await getAuthorizedMarket(input.crop, input.district)
+      : null;
+  const productionIndex =
+    !specialistOnly || input.specialist === "Market"
+      ? await getProductionIndex(input.crop)
+      : null;
+  const soilEvidence =
+    !specialistOnly || input.specialist === "Resources"
+      ? await getSoilEvidence(input.district, input.soil)
+      : null;
+  const diseaseEvidence =
+    !specialistOnly || input.specialist === "Disease"
+      ? await getCropDiseaseEvidence(input.crop, input.district)
+      : null;
 
   const specialists = [
     {
@@ -280,21 +300,28 @@ export async function POST(request: Request) {
     );
   }
 
-  const orchestratorPrompt =
-    `You are the central agricultural orchestrator. Reconcile these specialist outputs and produce 3 concise actions and 1 warning: ` +
-    agents.map((agent) => `${agent.agent}: ${agent.summary}`).join("; ") +
-    `. Return plain text only. Require local agronomist, soil lab, and farmer approval where consequential.`;
-  const orchestratorText = await gemini(orchestratorPrompt);
-  const plan = orchestratorText
-    ? orchestratorText.split(/\n|(?<=\.)\s+/).map((line: string) => line.replace(/^[-*\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 4)
-    : [
-        `${input.crop} disease review: compare symptoms across several leaves, capture growth stage and seek local confirmation before treatment.`,
-        Number(input.moisture) < 30
-          ? `Irrigation review: verify the root-zone moisture reading before release; rain forecast is ${input.rain}mm.`
-          : `Irrigation review: current moisture is ${input.moisture}% and rain forecast is ${input.rain}mm; verify locally before release.`,
-        "Resource review: obtain a recent soil test for pH and NPK; do not apply an invented fertilizer dose.",
-        `Market review: verify ${input.crop} variety, district mandi arrival and modal price before harvest or sale timing.`,
-      ];
+  let plan: string[];
+  if (specialistOnly) {
+    plan = [
+      `${input.specialist} specialist result is shown above. Run full collaboration for a coordinated plan.`,
+    ];
+  } else {
+    const orchestratorPrompt =
+      `You are the central agricultural orchestrator. Reconcile these specialist outputs and produce 3 concise actions and 1 warning: ` +
+      agents.map((agent) => `${agent.agent}: ${agent.summary}`).join("; ") +
+      `. Return plain text only. Require local agronomist, soil lab, and farmer approval where consequential.`;
+    const orchestratorText = await gemini(orchestratorPrompt);
+    plan = orchestratorText
+      ? orchestratorText.split(/\n|(?<=\.)\s+/).map((line: string) => line.replace(/^[-*\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 4)
+      : [
+          `${input.crop} disease review: compare symptoms across several leaves, capture growth stage and seek local confirmation before treatment.`,
+          Number(input.moisture) < 30
+            ? `Irrigation review: verify the root-zone moisture reading before release; rain forecast is ${input.rain}mm.`
+            : `Irrigation review: current moisture is ${input.moisture}% and rain forecast is ${input.rain}mm; verify locally before release.`,
+          "Resource review: obtain a recent soil test for pH and NPK; do not apply an invented fertilizer dose.",
+          `Market review: verify ${input.crop} variety, district mandi arrival and modal price before harvest or sale timing.`,
+        ];
+  }
 
   const sources: { name: string; status: "authorized" | "illustrative"; url?: string }[] = [
     weather
@@ -313,15 +340,28 @@ export async function POST(request: Request) {
       ? { name: productionIndex.name, status: "authorized", url: productionIndex.sourceUrl }
       : { name: "Agricultural production and productivity index", status: "illustrative", url: "https://www.data.gov.in/" },
   ];
+  const sourcesForSpecialist =
+    input.specialist === "Disease"
+      ? [sources[1]]
+      : input.specialist === "Irrigation"
+        ? [sources[0]]
+        : input.specialist === "Resources"
+          ? [sources[2]]
+          : input.specialist === "Market"
+            ? [sources[3], sources[4]]
+            : sources;
 
   return NextResponse.json({
     plan,
     warnings: [
       "No treatment, irrigation release, or fertilizer dose is applied automatically.",
       "Local agronomic verification is required before consequential action.",
+      ...(specialistOnly
+        ? [`Only the ${input.specialist} specialist ran; cross-agent orchestration was skipped.`]
+        : []),
     ],
     agents,
-    sources,
+    sources: sourcesForSpecialist,
     evidence: {
       weather: weather
         ? { name: weather.name, probability: weather.probability }
