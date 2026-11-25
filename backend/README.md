@@ -22,6 +22,12 @@ Open:
 
 When `POST /api/analyze` includes a `specialist`, only that agent's evidence sources are queried and the orchestrator is skipped. Omit `specialist` to run the full coordinated analysis.
 
+The dashboard's structured crop-triage action proxies to `POST /api/analyze-crop` through the Next.js API. Configure `AGROMIND_PYTHON_API_URL` for this action; the full-collaboration flow remains available separately.
+
+## Evidence status and freshness
+
+`/api/source-status` and `/api/ecosystem` report `public`, `configured`, or `not_configured`; these values describe access/configuration, not live health checks. Mandi record dates are exposed as samples, but their order and freshness are not verified. The default agricultural production index is historical context only; a configured replacement is also treated as historical until its timeframe is verified. Neither should be used as a current market signal. Verify current dated prices before harvest or sale timing.
+
 ## Test
 
 ```powershell

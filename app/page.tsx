@@ -12,6 +12,15 @@ type RunResult = {
   agents: AgentResult[];
   sources: { name: string; status: "authorized" | "illustrative"; url?: string }[];
 };
+type DiseaseDiagnosis = {
+  crop_name: string;
+  disease_name: string;
+  confidence: string;
+  severity: string;
+  symptoms: string[];
+  recommendations: string[];
+  follow_up: string[];
+};
 
 const emptyResult: RunResult = {
   plan: ["Select a field scenario or upload a crop image to begin."],
@@ -26,6 +35,23 @@ const emptyResult: RunResult = {
   sources: [{ name: "No source request has run", status: "illustrative" }],
 };
 
+function isDiseaseDiagnosis(value: unknown): value is DiseaseDiagnosis {
+  if (typeof value !== "object" || value === null) return false;
+  const diagnosis = value as Record<string, unknown>;
+  return (
+    typeof diagnosis.crop_name === "string" &&
+    typeof diagnosis.disease_name === "string" &&
+    typeof diagnosis.confidence === "string" &&
+    typeof diagnosis.severity === "string" &&
+    Array.isArray(diagnosis.symptoms) &&
+    diagnosis.symptoms.every((item) => typeof item === "string") &&
+    Array.isArray(diagnosis.recommendations) &&
+    diagnosis.recommendations.every((item) => typeof item === "string") &&
+    Array.isArray(diagnosis.follow_up) &&
+    diagnosis.follow_up.every((item) => typeof item === "string")
+  );
+}
+
 export default function Home() {
   const [theme, setTheme] = useState<"green" | "black">("green");
   const [language, setLanguage] = useState<"English" | "हिन्दी" | "తెలుగు">("English");
@@ -39,6 +65,8 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [activeAgent, setActiveAgent] = useState("Disease");
   const [result, setResult] = useState(emptyResult);
+  const [diseaseDiagnosis, setDiseaseDiagnosis] = useState<DiseaseDiagnosis | null>(null);
+  const [diseaseDiagnosisError, setDiseaseDiagnosisError] = useState("");
   const [imagePreview, setImagePreview] = useState("");
   const [imageData, setImageData] = useState("");
   const [chatInput, setChatInput] = useState("");
@@ -116,6 +144,10 @@ export default function Home() {
 
   function update(field: keyof typeof form, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
+    if (field === "crop" || field === "issue") {
+      setDiseaseDiagnosis(null);
+      setDiseaseDiagnosisError("");
+    }
   }
 
   function applyScenario(type: "tomato" | "rice" | "maize") {
@@ -139,8 +171,45 @@ export default function Home() {
       const value = String(reader.result);
       setImageData(value);
       setImagePreview(value);
+      setDiseaseDiagnosis(null);
+      setDiseaseDiagnosisError("");
     };
     reader.readAsDataURL(file);
+  }
+
+  async function runDiseaseScan() {
+    setLoading(true);
+    setDiseaseDiagnosis(null);
+    setDiseaseDiagnosisError("");
+    try {
+      const response = await fetch("/api/analyze-crop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...form, image: imageData }),
+      });
+      const body: unknown = await response.json();
+      if (!response.ok) {
+        const detail =
+          typeof body === "object" && body !== null && "error" in body &&
+          typeof body.error === "string"
+            ? body.error
+            : typeof body === "object" && body !== null && "detail" in body &&
+                typeof body.detail === "string"
+              ? body.detail
+              : "Structured disease triage is unavailable.";
+        throw new Error(detail);
+      }
+      if (!isDiseaseDiagnosis(body)) {
+        throw new Error("The diagnosis service returned an invalid response.");
+      }
+      setDiseaseDiagnosis(body);
+    } catch (error) {
+      setDiseaseDiagnosisError(
+        error instanceof Error ? error.message : "Structured disease triage failed.",
+      );
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function runAgents(event?: FormEvent) {
@@ -462,12 +531,30 @@ export default function Home() {
                   <button type="button" onClick={() => update("issue", "No visible disease symptoms")}>Healthy leaf</button>
                 </div>
                 <label>Observed symptom<textarea value={form.issue} onChange={(event) => update("issue", event.target.value)} /></label>
-                <button className="primary full" onClick={() => runAgents()} disabled={loading}>Run disease-to-orchestrator analysis</button>
+                <button className="primary full" onClick={runDiseaseScan} disabled={loading}>
+                  {loading ? "Analyzing crop..." : "Run structured disease triage"}
+                </button>
+                <button className="primary full" onClick={() => runAgents()} disabled={loading}>
+                  Run full agent collaboration
+                </button>
               </article>
               <article className="panel">
-                <div className="panel-title"><span className="eyebrow">Agent response</span><h2>Disease agent</h2></div>
-                <div className={`agent-status ${loading ? "working" : ""}`}>{loading ? "Scanning and consulting evidence..." : result.agents[0]?.summary}</div>
-                <div className="handoff"><strong>Cross-agent handoff</strong><p>Symptom confidence informs Irrigation risk, Resource checks and the Central Orchestrator.</p></div>
+                <div className="panel-title"><span className="eyebrow">Structured triage</span><h2>Disease assessment</h2></div>
+                {diseaseDiagnosisError && <p className="warning" role="alert">{diseaseDiagnosisError}</p>}
+                <div className={`agent-status ${loading ? "working" : ""}`}>
+                  {loading ? "Preparing structured disease triage..." : diseaseDiagnosis ? (
+                    <>
+                      <p><strong>Provisional assessment:</strong> {diseaseDiagnosis.disease_name}</p>
+                      <p><strong>Crop:</strong> {diseaseDiagnosis.crop_name}</p>
+                      <p><strong>Uncalibrated model confidence:</strong> {diseaseDiagnosis.confidence} · <strong>Severity estimate:</strong> {diseaseDiagnosis.severity}</p>
+                      <p><strong>Observed symptoms:</strong> {diseaseDiagnosis.symptoms.join("; ") || "None returned"}</p>
+                      <p><strong>Recommendations:</strong> {diseaseDiagnosis.recommendations.join("; ") || "None returned"}</p>
+                      <p><strong>Follow-up:</strong> {diseaseDiagnosis.follow_up.join("; ") || "None returned"}</p>
+                    </>
+                  ) : "No structured scan has been run. Verify any result with a local crop-health expert."}
+                </div>
+                <p className="warning">AI triage is not a confirmed diagnosis. Verify findings with a local crop-health expert before treatment.</p>
+                <div className="handoff"><strong>Cross-agent handoff</strong><p>Use full agent collaboration to combine disease triage with irrigation, resource and market context.</p></div>
               </article>
             </div>
           )}

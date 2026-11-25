@@ -67,6 +67,8 @@ def test_weather_network_error_is_reported_as_unavailable(monkeypatch) -> None:
 
 
 def test_analyze_returns_all_specialists(monkeypatch) -> None:
+    gemini_prompts = []
+
     async def no_core_evidence(field):
         return None, None, None
 
@@ -74,6 +76,7 @@ def test_analyze_returns_all_specialists(monkeypatch) -> None:
         return None
 
     async def no_gemini(prompt, image=None):
+        gemini_prompts.append(prompt)
         return None
 
     monkeypatch.setattr("agromind_api.main._gather_core_evidence", no_core_evidence)
@@ -104,9 +107,20 @@ def test_analyze_returns_all_specialists(monkeypatch) -> None:
     assert len(body["sources"]) == 5
     assert body["orchestratorRan"] is True
     assert all(agent["confidence"] is None for agent in body["agents"])
+    assert any(
+        "Treat mandi-record freshness as unverified" in prompt
+        for prompt in gemini_prompts
+    )
 
 
-def test_ecosystem_reports_all_agents_and_orchestrator() -> None:
+def test_ecosystem_reports_all_agents_and_orchestrator(monkeypatch) -> None:
+    for env_name in (
+        "KRISHI_DSS_API_URL",
+        "SOIL_HEALTH_API_URL",
+        "DATA_GOV_IN_API_KEY",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
     response = client.get("/api/ecosystem")
     assert response.status_code == 200
     body = response.json()
@@ -119,22 +133,53 @@ def test_ecosystem_reports_all_agents_and_orchestrator() -> None:
     ]
     irrigation = next(agent for agent in body["agents"] if agent["name"] == "Irrigation")
     assert irrigation["authorizedSources"] == ["Open-Meteo"]
+    assert irrigation["status"] == "public"
+    assert all(
+        agent["status"] == "not_configured"
+        for agent in body["agents"]
+        if agent["name"] != "Irrigation"
+    )
 
 
-def test_source_status_lists_all_authorized_sources() -> None:
+def test_source_status_reports_configuration_not_live_health(monkeypatch) -> None:
+    for env_name in (
+        "KRISHI_DSS_API_URL",
+        "SOIL_HEALTH_API_URL",
+        "DATA_GOV_IN_API_KEY",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
     response = client.get("/api/source-status")
     assert response.status_code == 200
-    names = {source["name"] for source in response.json()["sources"]}
-    assert names == {
+    sources = {source["name"]: source for source in response.json()["sources"]}
+    assert sources["Open-Meteo"]["status"] == "public"
+    assert all(
+        source["status"] == "not_configured"
+        for name, source in sources.items()
+        if name != "Open-Meteo"
+    )
+    assert set(sources) == {
         "Open-Meteo",
         "data.gov.in",
         "AGMARKNET",
         "Krishi DSS",
         "Soil Health Card",
     }
+    monkeypatch.setenv("DATA_GOV_IN_API_KEY", "configured")
+    monkeypatch.setenv("KRISHI_DSS_API_URL", "https://example.test/disease")
+    monkeypatch.setenv("SOIL_HEALTH_API_URL", "https://example.test/soil")
+    configured = {
+        source["name"]: source["status"]
+        for source in client.get("/api/source-status").json()["sources"]
+    }
+    assert configured["data.gov.in"] == "configured"
+    assert configured["AGMARKNET"] == "configured"
+    assert configured["Krishi DSS"] == "configured"
+    assert configured["Soil Health Card"] == "configured"
+    assert configured["Open-Meteo"] == "public"
 
 
-def test_market_conflict_uses_evidence_availability_not_summary_wording() -> None:
+def test_market_conflict_uses_freshness_not_summary_wording() -> None:
     field = FieldInput(
         crop="Tomato",
         district="Anantapur",
@@ -150,11 +195,61 @@ def test_market_conflict_uses_evidence_availability_not_summary_wording() -> Non
         confidence=None,
     )
 
-    _, available_conflicts = orchestrate(field, [market_agent], market_available=True)
-    _, missing_conflicts = orchestrate(field, [market_agent], market_available=False)
+    _, current_conflicts = orchestrate(field, [market_agent], market_current=True)
+    _, unverified_conflicts = orchestrate(field, [market_agent], market_current=False)
 
-    assert not any("Market evidence incomplete" in item for item in available_conflicts)
-    assert any("Market evidence incomplete" in item for item in missing_conflicts)
+    assert not any("freshness is unverified" in item for item in current_conflicts)
+    assert any("freshness is unverified" in item for item in unverified_conflicts)
+
+
+def test_market_prompt_discloses_unverified_dates_and_historical_index(
+    monkeypatch,
+) -> None:
+    captured_prompts = []
+
+    async def market_evidence(crop, district):
+        return {
+            "name": "data.gov.in mandi price records",
+            "recordCount": 2,
+            "averageModal": 2400,
+            "recordDates": ["01/02/2026", "04/02/2026"],
+            "freshnessVerified": False,
+        }
+
+    async def production_index(crop):
+        return {
+            "name": "Historical agricultural production index",
+            "productionIndex": 101.2,
+            "productivityIndex": 98.4,
+            "temporalScope": "Historical dataset; not a current market signal",
+        }
+
+    async def no_gemini(prompt, image=None):
+        captured_prompts.append(prompt)
+        return None
+
+    monkeypatch.setattr("agromind_api.main.get_authorized_market", market_evidence)
+    monkeypatch.setattr("agromind_api.main.get_production_index", production_index)
+    monkeypatch.setattr("agromind_api.main.gemini", no_gemini)
+
+    response = client.post(
+        "/api/analyze",
+        json={
+            "crop": "Tomato",
+            "district": "Anantapur",
+            "soil": "Red sandy loam",
+            "moisture": "22",
+            "rain": "18",
+            "issue": "Yellow-brown spots",
+            "specialist": "Market",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "mandi_record_dates=['01/02/2026', '04/02/2026']" in captured_prompts[0]
+    assert "market_freshness_verified=False" in captured_prompts[0]
+    assert "historical context only" in captured_prompts[0]
+    assert any("freshness are not verified" in item for item in response.json()["warnings"])
 
 
 @pytest.mark.parametrize(
@@ -273,6 +368,32 @@ def test_analyze_crop_includes_image_in_gemini_request(monkeypatch) -> None:
     assert requests[0]["contents"][0]["parts"][1] == {
         "inlineData": {"mimeType": "image/jpeg", "data": "aGVsbG8="}
     }
+
+
+@pytest.mark.parametrize("model_response", ["not-json", "[]"])
+def test_analyze_crop_invalid_model_output_returns_unconfirmed(
+    monkeypatch, model_response
+) -> None:
+    async def invalid_gemini(prompt, image=None):
+        return model_response
+
+    monkeypatch.setattr("agromind_api.main.gemini", invalid_gemini)
+
+    response = client.post(
+        "/api/analyze-crop",
+        json={
+            "crop": "Tomato",
+            "district": "Anantapur",
+            "soil": "Red sandy loam",
+            "moisture": "22",
+            "rain": "18",
+            "issue": "Yellow-brown spots",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["disease_name"] == "Unconfirmed"
+    assert response.json()["confidence"] == "Low"
 
 
 def test_analyze_passes_image_only_to_disease_agent(monkeypatch) -> None:

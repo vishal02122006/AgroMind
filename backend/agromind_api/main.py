@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import logging
 import os
 from typing import Any, Literal, TypedDict
@@ -7,7 +8,7 @@ from typing import Any, Literal, TypedDict
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +228,15 @@ async def get_authorized_market(crop: str, district: str) -> dict[str, Any] | No
 
     records = response.json().get("records", [])
     modal_prices: list[float] = []
+    record_dates: list[str] = []
     for record in records:
+        raw_date = (
+            record.get("arrival_date")
+            or record.get("date")
+            or record.get("Arrival Date")
+        )
+        if isinstance(raw_date, str) and raw_date.strip() and raw_date not in record_dates:
+            record_dates.append(raw_date.strip())
         raw = (
             record.get("modal_price")
             or record.get("modalprice")
@@ -239,18 +248,13 @@ async def get_authorized_market(crop: str, district: str) -> dict[str, Any] | No
             continue
 
     return {
-        "name": "data.gov.in - Current Daily Price of Various Commodities",
+        "name": "data.gov.in mandi price records",
         "recordCount": len(records),
         "averageModal": (
             sum(modal_prices) / len(modal_prices) if modal_prices else None
         ),
-        "latestDate": (
-            records[0].get("arrival_date")
-            or records[0].get("date")
-            or records[0].get("Arrival Date")
-            if records
-            else None
-        ),
+        "recordDates": record_dates,
+        "freshnessVerified": False,
         "sourceUrl": f"https://www.data.gov.in/resource/{resource}",
     }
 
@@ -303,6 +307,12 @@ async def get_production_index(crop: str) -> dict[str, Any] | None:
         "group": row[1],
         "productionIndex": production,
         "productivityIndex": productivity,
+        "temporalScope": (
+            "Configured dataset timeframe is unverified; not a current market signal"
+            if os.getenv("AGRICULTURAL_INDEX_URL")
+            else "Historical dataset, as indicated by the source filename; "
+            "not a current market signal"
+        ),
         "sourceUrl": url,
     }
 
@@ -333,7 +343,7 @@ async def get_authorized_evidence(
 def orchestrate(
     field: FieldInput,
     agents: list[AgentResult],
-    market_available: bool | None = None,
+    market_current: bool | None = None,
 ) -> tuple[list[str], list[str]]:
     summaries = {item.agent: item.summary.lower() for item in agents}
     conflicts: list[str] = []
@@ -364,8 +374,11 @@ def orchestrate(
             "Irrigation evidence conflict: depleted moisture but substantial forecast rainfall"
         )
     market_summary = summaries.get("Market")
-    if market_summary is not None and market_available is False:
-        conflicts.append("Market evidence incomplete: live district mandi comparison unavailable")
+    if market_summary is not None and market_current is False:
+        conflicts.append(
+            "Current mandi evidence is unavailable or its freshness is unverified; "
+            "do not use it alone for current sale or harvest timing"
+        )
 
     return plan[:4], conflicts
 
@@ -407,11 +420,12 @@ async def analyze_crop(field: FieldInput) -> dict[str, Any]:
             "follow_up": ["Capture a sharp close-up", "Record spread and growth stage"],
         }
     try:
-        import json
-
         parsed = json.loads(diagnosis)
-        return DiseaseDiagnosis(**parsed).model_dump()
-    except Exception:
+        return DiseaseDiagnosis.model_validate(parsed).model_dump()
+    except (json.JSONDecodeError, ValidationError) as exc:
+        logger.warning(
+            "Gemini crop diagnosis response was invalid (%s)", type(exc).__name__
+        )
         return {
             "crop_name": field.crop,
             "disease_name": "Unconfirmed",
@@ -447,16 +461,19 @@ async def ecosystem_status() -> dict[str, Any]:
     agent_statuses = []
     for name, config in AGENT_REGISTRY.items():
         env_name = env_by_agent[name]
-        connected = bool(
-            (name == "Irrigation")
-            or (env_name and os.getenv(env_name))
-        )
+        configured = bool(env_name and os.getenv(env_name))
         agent_statuses.append(
             {
                 "name": name,
                 "domain": config["domain"],
                 "authorizedSources": config["sources"],
-                "status": "connected" if connected else "fallback",
+                "status": (
+                    "public"
+                    if name == "Irrigation"
+                    else "configured"
+                    if configured
+                    else "not_configured"
+                ),
             }
         )
     return {
@@ -471,8 +488,7 @@ async def ecosystem_status() -> dict[str, Any]:
 
 @app.get("/api/source-status")
 async def source_status() -> dict[str, Any]:
-    connected_by_name = {
-        "Open-Meteo": True,
+    configured_by_name = {
         "data.gov.in": bool(os.getenv("DATA_GOV_IN_API_KEY")),
         "AGMARKNET": bool(os.getenv("DATA_GOV_IN_API_KEY")),
         "Krishi DSS": bool(os.getenv("KRISHI_DSS_API_URL")),
@@ -482,7 +498,13 @@ async def source_status() -> dict[str, Any]:
         "sources": [
             {
                 **source,
-                "status": "connected" if connected_by_name[source["name"]] else "unavailable",
+                "status": (
+                    "public"
+                    if source["name"] == "Open-Meteo"
+                    else "configured"
+                    if configured_by_name[source["name"]]
+                    else "not_configured"
+                ),
             }
             for source in SOURCE_REGISTRY
         ]
@@ -587,12 +609,20 @@ async def analyze(field: FieldInput) -> dict[str, Any]:
                 f"crop={field.crop}; district={field.district}; "
                 f"mandi_records={market.get('recordCount') if market else 'unavailable'}; "
                 f"average_modal_price={market.get('averageModal') if market else 'unavailable'}; "
+                f"mandi_record_dates={market.get('recordDates') if market else 'unavailable'}; "
+                f"market_freshness_verified={bool(market and market.get('freshnessVerified'))}; "
                 f"production_index={index.get('productionIndex') if index else 'unavailable'}; "
                 f"productivity_index={index.get('productivityIndex') if index else 'unavailable'}; "
-                "Explain evidence before harvest or sale timing; do not invent prices."
+                f"production_index_scope={index.get('temporalScope') if index else 'unavailable'}. "
+                "Mandi record order and freshness are not verified. Treat production indices as "
+                "historical context only. Do not recommend current harvest or sale timing from "
+                "these data alone; state when dated current evidence is unavailable."
             ),
             "fallback": (
-                f"{market['recordCount']} authorized mandi records found; averages need review"
+                "Mandi records were fetched, but their dates, ordering, and freshness are "
+                "unverified; verify current dated prices before sale timing"
+                if market and market.get("recordCount")
+                else "No matching district mandi records were returned"
                 if market
                 else "District mandi evidence is unavailable"
             ),
@@ -628,13 +658,19 @@ async def analyze(field: FieldInput) -> dict[str, Any]:
         orchestrator_prompt = (
             "You are the central agricultural orchestrator. Reconcile these independent outputs "
             f"and produce 3 concise actions and 1 warning: {agents}. "
+            "Treat mandi-record freshness as unverified and production indices as historical "
+            "context only; do not recommend current sale or harvest timing from them. "
             "Require local agronomist, soil-lab, and farmer approval."
         )
         orchestrator_text = await gemini(orchestrator_prompt)
         plan, conflicts = orchestrate(
             field,
             agents,
-            market_available=bool(market and market.get("recordCount")),
+            market_current=bool(
+                market
+                and market.get("recordCount")
+                and market.get("freshnessVerified")
+            ),
         )
         if orchestrator_text:
             orchestrated = [
@@ -685,6 +721,12 @@ async def analyze(field: FieldInput) -> dict[str, Any]:
     if specialist_only:
         warnings.append(
             f"Only the {field.specialist} specialist ran; cross-agent orchestration was skipped."
+        )
+    if field.specialist == "Market":
+        warnings.append(
+            "Mandi records are absent or their dates, ordering, and freshness are not "
+            "verified; confirm "
+            "current dated prices before sale or harvest timing."
         )
     warnings.extend(conflicts)
     return {

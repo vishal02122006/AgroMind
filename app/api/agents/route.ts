@@ -102,6 +102,18 @@ async function getAuthorizedMarket(crop: string, district: string) {
     if (!response.ok) return null;
     const data = await response.json();
     const records = data.records || [];
+    const recordDates = Array.from(
+      new Set(
+        records
+          .map((record: Record<string, unknown>) =>
+            record.arrival_date ?? record.date ?? record["Arrival Date"],
+          )
+          .filter((value: unknown): value is string =>
+            typeof value === "string" && value.trim().length > 0,
+          )
+          .map((value: string) => value.trim()),
+      ),
+    ).slice(0, 10);
     const modalPrices = records
       .map((record: Record<string, unknown>) =>
         Number(record.modal_price ?? record.modalprice ?? record["Modal Price"]),
@@ -112,11 +124,11 @@ async function getAuthorizedMarket(crop: string, district: string) {
         ? modalPrices.reduce((sum: number, value: number) => sum + value, 0) / modalPrices.length
         : null;
     return {
-      name: "data.gov.in - Current Daily Price of Various Commodities",
+      name: "data.gov.in mandi price records",
       recordCount: records.length,
       averageModal,
-      latestDate:
-        records[0]?.arrival_date ?? records[0]?.date ?? records[0]?.["Arrival Date"] ?? null,
+      recordDates,
+      freshnessVerified: false,
       sourceUrl: `https://www.data.gov.in/resource/${resource}`,
     };
   } catch {
@@ -146,7 +158,11 @@ async function getProductionIndex(crop: string) {
       group: row[1],
       productionIndex: Number(row[2]),
       productivityIndex: Number(row[3]),
-      sourceUrl: "https://www.data.gov.in/files/ogdpv2dms/s3fs-public/datafile/index_numbers_of_agricultural_production_and_productivity_2006-07_2009.csv",
+      temporalScope:
+        process.env.AGRICULTURAL_INDEX_URL
+          ? "Configured dataset timeframe is unverified; not a current market signal"
+          : "Historical dataset, as indicated by the source filename; not a current market signal",
+      sourceUrl: url,
     };
   } catch {
     return null;
@@ -300,10 +316,12 @@ export async function POST(request: Request) {
     },
     {
       agent: "Market",
-      prompt: `You are a market-timing specialist. Given crop=${input.crop}, district=${input.district}, authorized_mandi_record_count=${market?.recordCount ?? "unavailable"}, average_mandi_modal_price=${market?.averageModal ?? "unavailable"}, production_index=${productionIndex?.productionIndex ?? "unavailable"}, productivity_index=${productionIndex?.productivityIndex ?? "unavailable"}, respond in <=45 words. Explain the evidence before harvest or sale timing; do not invent prices or guarantees.`,
-      fallback: market
-        ? `${market.recordCount} authorized mandi records found; averages need review`
-        : `No live mandi feed is configured for ${input.crop} in ${input.district}. Delay sale timing advice until arrival, variety and district records are verified.`,
+      prompt: `You are a market-evidence specialist. Given crop=${input.crop}, district=${input.district}, mandi_record_count=${market?.recordCount ?? "unavailable"}, mandi_record_dates=${JSON.stringify(market?.recordDates ?? [])}, market_freshness_verified=${market?.freshnessVerified ?? false}, average_mandi_modal_price=${market?.averageModal ?? "unavailable"}, production_index=${productionIndex?.productionIndex ?? "unavailable"}, productivity_index=${productionIndex?.productivityIndex ?? "unavailable"}, production_index_scope=${productionIndex?.temporalScope ?? "unavailable"}, respond in <=45 words. Record ordering and freshness are not verified; treat production indices as historical context only. Do not recommend current harvest or sale timing from these data alone; state when dated current evidence is unavailable.`,
+      fallback: market?.recordCount
+        ? "Mandi records were fetched, but their dates, ordering, and freshness are unverified; verify current dated prices before sale timing."
+        : market
+          ? `No matching mandi records were returned for ${input.crop} in ${input.district}.`
+          : `No live mandi feed is configured for ${input.crop} in ${input.district}. Delay sale timing advice until arrival, variety and district records are verified.`,
     },
   ];
 
@@ -330,7 +348,7 @@ export async function POST(request: Request) {
     const orchestratorPrompt =
       `You are the central agricultural orchestrator. Reconcile these specialist outputs and produce 3 concise actions and 1 warning: ` +
       agents.map((agent) => `${agent.agent}: ${agent.summary}`).join("; ") +
-      `. Return plain text only. Require local agronomist, soil lab, and farmer approval where consequential.`;
+      `. Return plain text only. Treat mandi-record freshness as unverified and production indices as historical context only; do not recommend current sale or harvest timing from them. Require local agronomist, soil lab, and farmer approval where consequential.`;
     const orchestratorText = await gemini(orchestratorPrompt);
     plan = orchestratorText
       ? orchestratorText.split(/\n|(?<=\.)\s+/).map((line: string) => line.replace(/^[-*\d.)\s]+/, "").trim()).filter(Boolean).slice(0, 4)
@@ -377,6 +395,9 @@ export async function POST(request: Request) {
     warnings: [
       "No treatment, irrigation release, or fertilizer dose is applied automatically.",
       "Local agronomic verification is required before consequential action.",
+      ...(input.specialist === undefined || input.specialist === "Market"
+        ? ["Mandi records are absent or their dates, ordering, and freshness are not verified; confirm current dated prices before sale or harvest timing."]
+        : []),
       ...(specialistOnly
         ? [`Only the ${input.specialist} specialist ran; cross-agent orchestration was skipped.`]
         : []),
@@ -398,7 +419,8 @@ export async function POST(request: Request) {
         ? {
             recordCount: market.recordCount,
             averageModal: market.averageModal,
-            latestDate: market.latestDate,
+            recordDates: market.recordDates,
+            freshnessVerified: market.freshnessVerified,
             sourceUrl: market.sourceUrl,
           }
         : null,

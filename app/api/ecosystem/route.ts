@@ -9,8 +9,12 @@ export async function GET() {
         { cache: "no-store" },
       );
       if (response.ok) return NextResponse.json(await response.json());
-    } catch {
-      // Return the repository-level fallback registry below.
+      console.warn("Python ecosystem request failed", response.status);
+    } catch (error) {
+      console.warn(
+        "Python ecosystem request failed",
+        error instanceof Error ? error.name : "UnknownError",
+      );
     }
   }
 
@@ -21,10 +25,10 @@ export async function GET() {
       humanApprovalRequired: true,
     },
     agents: [
-      { name: "Disease", domain: "disease", authorizedSources: ["Krishi DSS"], status: "fallback" },
-      { name: "Irrigation", domain: "weather", authorizedSources: ["Open-Meteo"], status: "connected" },
-      { name: "Resources", domain: "soil", authorizedSources: ["Soil Health Card"], status: "fallback" },
-      { name: "Market", domain: "market", authorizedSources: ["data.gov.in", "AGMARKNET", "Agricultural indices"], status: "fallback" },
+      { name: "Disease", domain: "disease", authorizedSources: ["Krishi DSS"], status: process.env.KRISHI_DSS_API_URL ? "configured" : "not_configured" },
+      { name: "Irrigation", domain: "weather", authorizedSources: ["Open-Meteo"], status: "public" },
+      { name: "Resources", domain: "soil", authorizedSources: ["Soil Health Card"], status: process.env.SOIL_HEALTH_API_URL ? "configured" : "not_configured" },
+      { name: "Market", domain: "market", authorizedSources: ["data.gov.in", "AGMARKNET", "Agricultural indices"], status: process.env.DATA_GOV_IN_API_KEY ? "configured" : "not_configured" },
     ],
   });
 }
