@@ -195,8 +195,8 @@ async function getCropDiseaseEvidence(crop: string, district: string) {
   }
 }
 
-function fallbackAgent(agent: string, input: FieldInput, detail: string): AgentResult {
-  return { agent, status: "ok", summary: detail, confidence: 55 };
+function fallbackAgent(agent: string, detail: string): AgentResult {
+  return { agent, status: "fallback", summary: detail, confidence: 55 };
 }
 
 export async function POST(request: Request) {
@@ -276,7 +276,7 @@ export async function POST(request: Request) {
     agents.push(
       text
         ? { agent: specialist.agent, status: "ok", summary: text, confidence: 72 }
-        : fallbackAgent(specialist.agent, input, specialist.fallback),
+        : fallbackAgent(specialist.agent, specialist.fallback),
     );
   }
 
